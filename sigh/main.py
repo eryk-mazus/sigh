@@ -73,9 +73,6 @@ class AudioAsync:
         return self.audio_buffer[-num_samples:]
 
 
-# TODO:
-# somethig is wrong with high pass filter :/
-# with cutoff > 0.0, no speech is detected
 @jit(nopython=True)
 def high_pass_filter(data, cutoff: float, sample_rate: float):
     # python adaptation of:
@@ -131,27 +128,29 @@ if __name__ == "__main__":
     WHISPER_SAMPLE_RATE = 16000
     vad_thold = 0.6
     freq_thold = 80.0
-    freq_thold = 0.0
     vad_verbose = False
 
     # main loop:
     audio = AudioAsync(len_ms=len_ms, capture_id=1)
     audio.resume()
 
-    # wait for 2 seconds to avoid any buffered noise
+    # wait for 1 second to avoid any buffered noise
     time.sleep(1)
     audio.clear()
 
     try:
         while True:
-            # input("Press Enter to fetch the last 2000ms of audio or Ctrl+C to exit")
-            # time.sleep(300 // 1000)
+            time.sleep(100 / 1000)
 
             data = audio.get(2000)
             # print(f"Fetched audio: {data}\t\tShape: {data.shape}")
 
             if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold, vad_verbose):
                 print("Speech detected! Processing ...")
+
+                # detect commands
+                ...
+
             # else:
             #     print("Nope...")
 
@@ -159,3 +158,7 @@ if __name__ == "__main__":
         print("Exiting...")
     finally:
         audio.terminate()
+
+
+# todo:
+# add and parse args
