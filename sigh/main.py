@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-import os
 import math
+import os
 import time
 
+import fire
 import numpy as np
 import pyaudio
+import torch
+import whisper
 from numba import jit
 
-# preventing ugly scipy exit error:
+# avoiding the scipy exit error:
 os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
+
+WHISPER_SAMPLE_RATE = 16_000
 
 
 class AudioAsync:
@@ -38,10 +43,13 @@ class AudioAsync:
                 )
                 > 0
             ):
-                print(
-                    f"  - Capture device #{i}: '{self.p.get_device_info_by_host_api_device_index(0, i).get('name')}'"
+                device_name = self.p.get_device_info_by_host_api_device_index(0, i).get(
+                    "name"
                 )
-        print(f"Using capture device: {capture_id}")
+                device_name = device_name.encode("utf-8", errors="replace").decode(
+                    "utf-8"
+                )
+                print(f"  - Capture device #{i}: '{device_name}'")
 
         self.stream = self.p.open(
             format=self.format,
@@ -79,20 +87,22 @@ class AudioAsync:
 
 
 @jit(nopython=True)
-def high_pass_filter(data, cutoff: float, sample_rate: float):
+def high_pass_filter(data: np.array, cutoff: float, sample_rate: float) -> np.array:
     # python adaptation of:
     # https://github.com/ggerganov/whisper.cpp/blob/2f52783a080e8955e80e4324fed73e2f906bb80c/examples/common.cpp#L684
     rc = 1.0 / (2.0 * math.pi * cutoff)
     dt = 1.0 / sample_rate
     alpha = dt / (rc + dt)
 
-    y = data[0]
+    y = 0.0
+    output = np.empty_like(data)
+    output[0] = data[0]
 
     for i in range(1, len(data)):
         y = alpha * (y + data[i] - data[i - 1])
-        data[i] = y
+        output[i] = y
 
-    return data
+    return output
 
 
 @jit(nopython=True)
@@ -125,40 +135,63 @@ def vad(
     return energy_last <= vad_thold * energy_all
 
 
-if __name__ == "__main__":
-    # audio async params:
-    len_ms = 30 * 1000
+def main(
+    # AudioAsync params:
+    buffer_len_ms: int = 30 * 1000,
+    capture_device_id: int = 1,
+    # VAD params:
+    vad_thold: float = 0.6,
+    freq_thold: float = 80.0,
+    # Whisper params:
+    model_name: str = "medium",
+    language: str = "en",
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # vad params:
-    WHISPER_SAMPLE_RATE = 16000
-    vad_thold = 0.6
-    freq_thold = 0.0
-    # freq_thold = 80.0
-    vad_verbose = False
+    print(f"  - Whisper device: {device}")
+    print(f"  - Whisper model: {model_name}")
 
-    # main loop:
-    audio = AudioAsync(len_ms=len_ms, capture_id=1)
+    model = whisper.load_model(model_name, device=device)
+
+    print(f"  - Using capture device: {capture_device_id}")
+
+    audio = AudioAsync(
+        len_ms=buffer_len_ms,
+        sample_rate=WHISPER_SAMPLE_RATE,
+        capture_id=capture_device_id,
+    )
     audio.resume()
 
     # wait for 1 second to avoid any buffered noise
     time.sleep(1)
     audio.clear()
 
+    print("Waiting for voice commands ...")
+
     try:
         while True:
             time.sleep(100 / 1000)
-
             data = audio.get(2000)
-            # print(f"Fetched audio: {data}\t\tShape: {data.shape}")
 
-            if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold, vad_verbose):
+            if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold, False):
                 print("Speech detected! Processing ...")
 
+                data = audio.get(3000)
                 # detect commands
-                ...
+                data = torch.tensor(data, device=device, dtype=torch.float32)
+                result = model.transcribe(
+                    audio=data,
+                    language=language,
+                    beam_size=5,
+                    fp16=True,
+                    verbose=True,
+                    # If the no_speech probability is higher than this value AND the average log probability
+                    # over sampled tokens is below `logprob_threshold`, consider the segment as silent:
+                    logprob_threshold=-0.5,
+                    no_speech_threshold=0.2,
+                )
 
-            # else:
-            #     print("Nope...")
+                print(result)
 
     except KeyboardInterrupt:
         print("Exiting...")
@@ -166,9 +199,19 @@ if __name__ == "__main__":
         audio.terminate()
 
 
-# todo:
-# add and parse args
-# different modes: always transcribe
-# prompt + transcribe
+if __name__ == "__main__":
+    fire.Fire(main)
 
+
+# todo:
+# different modes:
+# - always transcribe
+# - (wake word/prompt) + command
+# whisper:
+# - cpu
+
+# refactor
+
+# low priority:
+# colors
 # nicer prints
