@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
+import os
 import math
 import time
 
 import numpy as np
 import pyaudio
 from numba import jit
+
+# preventing ugly scipy exit error:
+os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 
 
 class AudioAsync:
@@ -35,8 +39,9 @@ class AudioAsync:
                 > 0
             ):
                 print(
-                    f"\t- Capture device #{i}: '{self.p.get_device_info_by_host_api_device_index(0, i).get('name')}'"
+                    f"  - Capture device #{i}: '{self.p.get_device_info_by_host_api_device_index(0, i).get('name')}'"
                 )
+        print(f"Using capture device: {capture_id}")
 
         self.stream = self.p.open(
             format=self.format,
@@ -127,7 +132,8 @@ if __name__ == "__main__":
     # vad params:
     WHISPER_SAMPLE_RATE = 16000
     vad_thold = 0.6
-    freq_thold = 80.0
+    freq_thold = 0.0
+    # freq_thold = 80.0
     vad_verbose = False
 
     # main loop:
@@ -162,3 +168,7 @@ if __name__ == "__main__":
 
 # todo:
 # add and parse args
+# different modes: always transcribe
+# prompt + transcribe
+
+# nicer prints
