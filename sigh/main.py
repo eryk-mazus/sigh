@@ -129,7 +129,8 @@ def vad(
 
     if verbose:
         print(
-            f"energy_all: {energy_all}, energy_last: {energy_last}, vad_thold: {vad_thold}, freq_thold: {freq_thold}"
+            f"energy_all: {energy_all}, energy_last: {energy_last}, "
+            f"vad_thold: {vad_thold}, freq_thold: {freq_thold}"
         )
 
     return energy_last <= vad_thold * energy_all
@@ -185,8 +186,9 @@ def main(
                     beam_size=5,
                     fp16=True,
                     verbose=True,
-                    # If the no_speech probability is higher than this value AND the average log probability
-                    # over sampled tokens is below `logprob_threshold`, consider the segment as silent:
+                    # If the no_speech probability is higher than this value
+                    # AND the average log probability over sampled tokens
+                    # is below `logprob_threshold`, consider the segment as silent:
                     logprob_threshold=-0.5,
                     no_speech_threshold=0.2,
                 )
