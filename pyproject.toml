@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sigh"
+description = "Background voice detection program that listens for a wake word and activates transcription mode"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["voice-recognition", "speech-recognition", "speech-to-text", "whisper"]
+license = { text = "MIT License" }
+dependencies = [
+    "fire==0.5.0",
+    "numba==0.57.0",
+    "PyAudio==0.2.13",
+    "torch>=1.11.0",
+    "tqdm",
+]
+version = "0.0.1"
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit",
+    "pyright==1.1.304",
+]
+
+[tool.pyright]
+include = ["sigh*"]
+reportPrivateImportUsage = false
+
+[tool.setuptools.packages.find]
+include = ["sigh"]
+
+[tool.ruff]
+# Enable pycodestyle (`E`), Pyflakes (`F`), and isort (`I`) codes
+# See https://beta.ruff.rs/docs/rules/ for more possible rules
+select = ["E", "F", "I"]
+# Same as Black.
+line-length = 88
+# Avoid automatically removing unused imports in __init__.py files.
+# Such imports will be flagged with a dedicated message suggesting
+# that the import is either added to the module's __all__ symbol
+ignore-init-module-imports = true
