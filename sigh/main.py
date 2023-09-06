@@ -2,6 +2,7 @@
 import math
 import os
 import time
+from typing import Dict
 
 import fire
 import numpy as np
@@ -9,6 +10,7 @@ import pyaudio
 import torch
 import whisper
 from numba import jit
+from rapidfuzz.distance.Levenshtein import normalized_distance
 
 # avoiding the scipy exit error:
 os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
@@ -45,9 +47,6 @@ class AudioAsync:
             ):
                 device_name = self.p.get_device_info_by_host_api_device_index(0, i).get(
                     "name"
-                )
-                device_name = device_name.encode("utf-8", errors="replace").decode(
-                    "utf-8"
                 )
                 print(f"  - Capture device #{i}: '{device_name}'")
 
@@ -88,8 +87,11 @@ class AudioAsync:
 
 @jit(nopython=True)
 def high_pass_filter(data: np.array, cutoff: float, sample_rate: float) -> np.array:
-    # python adaptation of:
+    # python/numpy adaptation of:
     # https://github.com/ggerganov/whisper.cpp/blob/2f52783a080e8955e80e4324fed73e2f906bb80c/examples/common.cpp#L684
+
+    # TODO:
+    # speed up, using numpy:
     rc = 1.0 / (2.0 * math.pi * cutoff)
     dt = 1.0 / sample_rate
     alpha = dt / (rc + dt)
@@ -136,6 +138,13 @@ def vad(
     return energy_last <= vad_thold * energy_all
 
 
+def command_transcribe(
+    model, pcmf32: np.array, device: str, whisper_kwargs: Dict
+) -> Dict:
+    pcmf32_pt = torch.tensor(pcmf32, device=device, dtype=torch.float32)
+    return model.transcribe(audio=pcmf32_pt, **whisper_kwargs)
+
+
 def main(
     # AudioAsync params:
     buffer_len_ms: int = 30 * 1000,
@@ -146,11 +155,26 @@ def main(
     # Whisper params:
     model_name: str = "medium",
     language: str = "en",
+    logprob_threshold: float = -1.0,
+    no_speech_threshold: float = 0.2,
+    # Prompt params:
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"  - Whisper device: {device}")
     print(f"  - Whisper model: {model_name}")
+
+    whisper_gen_kwargs = {
+        "language": language,
+        "beam_size": 5,
+        "fp16": True,
+        "verbose": None,
+        # If the no_speech probability is higher than this value
+        # AND the average log probability over sampled tokens
+        # is below `logprob_threshold`, consider the segment as silent:
+        "logprob_threshold": logprob_threshold,
+        "no_speech_threshold": no_speech_threshold,
+    }
 
     model = whisper.load_model(model_name, device=device)
 
@@ -167,6 +191,11 @@ def main(
     time.sleep(1)
     audio.clear()
 
+    have_prompt = False
+    # for now: hard coded prompt:
+    prompt_ms = 2000
+    k_prompt = "gpt"
+
     print("Waiting for voice commands ...")
 
     try:
@@ -177,23 +206,26 @@ def main(
             if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold, False):
                 print("Speech detected! Processing ...")
 
-                data = audio.get(3000)
-                # detect commands
-                data = torch.tensor(data, device=device, dtype=torch.float32)
-                result = model.transcribe(
-                    audio=data,
-                    language=language,
-                    beam_size=5,
-                    fp16=True,
-                    verbose=True,
-                    # If the no_speech probability is higher than this value
-                    # AND the average log probability over sampled tokens
-                    # is below `logprob_threshold`, consider the segment as silent:
-                    logprob_threshold=-0.5,
-                    no_speech_threshold=0.2,
-                )
+                if not have_prompt:
+                    pcmf32_cur = audio.get(prompt_ms)
+                    result = command_transcribe(
+                        model, pcmf32_cur, device, whisper_gen_kwargs
+                    )
 
-                print(result)
+                    txt = result["text"].strip().strip(".")
+
+                    if not txt:
+                        print("WARNING: prompt not recognized, try again")
+                        continue
+
+                    print(f"Heard: {txt}")
+                    dist = normalized_distance(txt.lower(), k_prompt)
+                    print(f"prompt = {k_prompt}, dist= {dist:.3f}")
+
+                    # have_prompt = True
+                else:
+                    # TODO: real-time transcription
+                    ...
 
     except KeyboardInterrupt:
         print("Exiting...")
@@ -203,17 +235,3 @@ def main(
 
 if __name__ == "__main__":
     fire.Fire(main)
-
-
-# todo:
-# different modes:
-# - always transcribe
-# - (wake word/prompt) + command
-# whisper:
-# - cpu
-
-# refactor
-
-# low priority:
-# colors
-# nicer prints
