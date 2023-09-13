@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 import math
 import os
+import sys
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 import fire
 import numpy as np
-import pyaudio
 import torch
 import whisper
-from numba import jit
 from rapidfuzz.distance.Levenshtein import normalized_distance
+
+from sigh import AudioAsync
 
 # avoiding the scipy exit error:
 os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
@@ -18,80 +19,10 @@ os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 WHISPER_SAMPLE_RATE = 16_000
 
 
-class AudioAsync:
-    def __init__(
-        self,
-        len_ms=2000,  # length of audio buffer in milliseconds, defaults to 2s
-        sample_rate=44100,  # number of samples of audio taken per second
-        channels=1,  # number of audio channels, 1 - mono, 2 - stereo
-        format=pyaudio.paFloat32,
-        capture_id: int = 0,  # id of capture device to use
-    ):
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.format = format
-        self.frames_per_buffer = int(
-            self.sample_rate * len_ms / 1000
-        )  # samples per millisecond * len_ms
-        self.audio_buffer = np.zeros(self.frames_per_buffer)
-
-        self.p = pyaudio.PyAudio()
-
-        num_devices = self.p.get_host_api_info_by_index(0).get("deviceCount")
-        for i in range(num_devices):
-            if (
-                self.p.get_device_info_by_host_api_device_index(0, i).get(
-                    "maxInputChannels"
-                )
-                > 0
-            ):
-                device_name = self.p.get_device_info_by_host_api_device_index(0, i).get(
-                    "name"
-                )
-                print(f"  - Capture device #{i}: '{device_name}'")
-
-        self.stream = self.p.open(
-            format=self.format,
-            channels=self.channels,
-            rate=self.sample_rate,
-            input=True,
-            input_device_index=capture_id,
-            stream_callback=self.callback,
-        )
-
-    def resume(self):
-        self.stream.start_stream()
-
-    def pause(self):
-        self.stream.stop_stream()
-
-    def terminate(self):
-        self.pause()
-        self.stream.close()
-        self.p.terminate()
-
-    def clear(self):
-        self.audio_buffer = np.zeros(self.frames_per_buffer)
-
-    def callback(self, in_data, frame_count, time_info, status):
-        audio_data = np.frombuffer(in_data, dtype=np.float32)
-        self.audio_buffer = np.roll(self.audio_buffer, -len(audio_data))
-        self.audio_buffer[-len(audio_data) :] = audio_data
-        return (in_data, pyaudio.paContinue)
-
-    def get(self, ms: int):
-        # get audio data from the circular buffer
-        num_samples = int(self.sample_rate * ms / 1000)
-        return self.audio_buffer[-num_samples:]
-
-
-@jit(nopython=True)
 def high_pass_filter(data: np.array, cutoff: float, sample_rate: float) -> np.array:
     # python/numpy adaptation of:
     # https://github.com/ggerganov/whisper.cpp/blob/2f52783a080e8955e80e4324fed73e2f906bb80c/examples/common.cpp#L684
 
-    # TODO:
-    # speed up, using numpy:
     rc = 1.0 / (2.0 * math.pi * cutoff)
     dt = 1.0 / sample_rate
     alpha = dt / (rc + dt)
@@ -100,6 +31,8 @@ def high_pass_filter(data: np.array, cutoff: float, sample_rate: float) -> np.ar
     output = np.empty_like(data)
     output[0] = data[0]
 
+    # TODO:
+    # speed up, using numpy:
     for i in range(1, len(data)):
         y = alpha * (y + data[i] - data[i - 1])
         output[i] = y
@@ -107,7 +40,6 @@ def high_pass_filter(data: np.array, cutoff: float, sample_rate: float) -> np.ar
     return output
 
 
-@jit(nopython=True)
 def vad(
     pcmf32,
     sample_rate: int,
@@ -138,26 +70,40 @@ def vad(
     return energy_last <= vad_thold * energy_all
 
 
-def command_transcribe(
-    model, pcmf32: np.array, device: str, whisper_kwargs: Dict
+def transcribe(
+    model,
+    pcmf32: np.array,
+    device: str,
+    initial_prompt: Optional[str] = None,
+    **kwargs: Dict,
 ) -> Dict:
     pcmf32_pt = torch.tensor(pcmf32, device=device, dtype=torch.float32)
-    return model.transcribe(audio=pcmf32_pt, **whisper_kwargs)
+    return model.transcribe(
+        audio=pcmf32_pt,
+        initial_prompt=initial_prompt,
+        condition_on_previous_text=True,
+        **kwargs,
+    )
 
 
 def main(
     # AudioAsync params:
-    buffer_len_ms: int = 30 * 1000,
+    length_ms: int = 5000,
     capture_device_id: int = 1,
     # VAD params:
     vad_thold: float = 0.6,
     freq_thold: float = 80.0,
     # Whisper params:
-    model_name: str = "medium",
+    model_name: str = "base",
     language: str = "en",
     logprob_threshold: float = -1.0,
     no_speech_threshold: float = 0.2,
     # Prompt params:
+    prompt_ms: int = 2000,
+    k_prompt: str = "gpt",
+    # Stream params:
+    keep_ms: int = 100,
+    step_ms: int = 500,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -181,35 +127,53 @@ def main(
     print(f"  - Using capture device: {capture_device_id}")
 
     audio = AudioAsync(
-        len_ms=buffer_len_ms,
+        len_ms=length_ms,
         sample_rate=WHISPER_SAMPLE_RATE,
         capture_id=capture_device_id,
     )
     audio.resume()
 
+    # streaming params:
+    keep_ms = min(keep_ms, step_ms)
+    length_ms = max(length_ms, step_ms)
+
+    n_samples_len = int((1e-3 * length_ms) * WHISPER_SAMPLE_RATE)
+    n_samples_keep = int((1e-3 * keep_ms) * WHISPER_SAMPLE_RATE)
+
+    n_new_line = max(1, length_ms // step_ms - 1)
+    print(f"  - # of transcription segments: {n_new_line}")
+
+    whisper_prompt_tokens = None
+
+    pcmf32_old = np.empty(0)
+
+    # prompt:
+    have_prompt = True
+
+    n_iter = 0
     # wait for 1 second to avoid any buffered noise
     time.sleep(1)
     audio.clear()
 
-    have_prompt = False
-    # for now: hard coded prompt:
-    prompt_ms = 2000
-    k_prompt = "gpt"
-
-    print("Waiting for voice commands ...")
+    print("Waiting for command...")
 
     try:
         while True:
             time.sleep(100 / 1000)
             data = audio.get(2000)
 
-            if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold, False):
-                print("Speech detected! Processing ...")
+            if not have_prompt:
+                if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold, False):
+                    print("Speech detected! Processing ...")
 
-                if not have_prompt:
                     pcmf32_cur = audio.get(prompt_ms)
-                    result = command_transcribe(
-                        model, pcmf32_cur, device, whisper_gen_kwargs
+
+                    result = transcribe(
+                        model,
+                        pcmf32_cur,
+                        device,
+                        initial_prompt=None,
+                        **whisper_gen_kwargs,
                     )
 
                     txt = result["text"].strip().strip(".")
@@ -222,10 +186,60 @@ def main(
                     dist = normalized_distance(txt.lower(), k_prompt)
                     print(f"prompt = {k_prompt}, dist= {dist:.3f}")
 
-                    # have_prompt = True
-                else:
-                    # TODO: real-time transcription
-                    ...
+                    have_prompt = True
+                    audio.clear()
+            else:
+                print("### Transcription START")
+                while True:
+                    # process new audio
+                    pcmf32_new = audio.get(step_ms)
+                    audio.clear()
+
+                    n_samples_new = pcmf32_new.size
+                    n_samples_take = min(
+                        pcmf32_old.size,
+                        max(0, n_samples_keep + n_samples_len - n_samples_new),
+                    )
+
+                    pcmf32 = np.hstack((pcmf32_old[-n_samples_take:], pcmf32_new))
+
+                    pcmf32_old = pcmf32
+
+                    # run inference
+                    result = transcribe(
+                        model,
+                        pcmf32,
+                        device,
+                        initial_prompt=whisper_prompt_tokens,
+                        **whisper_gen_kwargs,
+                    )
+                    txt = result["text"]
+
+                    # print results
+                    sys.stdout.write("\33[2K\r")
+                    sys.stdout.flush()
+
+                    print(" " * 100, end="")
+
+                    sys.stdout.write("\33[2K\r")
+                    sys.stdout.flush()
+
+                    if txt:
+                        print(txt, end="", flush=True)
+
+                    n_iter += 1
+
+                    if n_iter % n_new_line == 0:
+                        print("\n", end="", flush=True)
+
+                        # keep part of the audio for next iteration
+                        # to try to mitigate word boundary issues
+                        pcmf32_old = pcmf32[-n_samples_keep:]
+
+                        # whisper_prompt_tokens = ""
+                        # # Add tokens of the last full length segment as the prompt
+                        # # if not no_context (keep context between audio chunks)
+                        # whisper_prompt_tokens += txt
 
     except KeyboardInterrupt:
         print("Exiting...")
