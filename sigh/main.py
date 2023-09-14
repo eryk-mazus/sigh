@@ -3,12 +3,12 @@ import math
 import os
 import sys
 import time
-from typing import Dict, Optional
+from typing import Dict
 
 import fire
 import numpy as np
 import torch
-import whisper
+from faster_whisper import WhisperModel
 from rapidfuzz.distance.Levenshtein import normalized_distance
 
 from sigh import AudioAsync
@@ -73,17 +73,11 @@ def vad(
 def transcribe(
     model,
     pcmf32: np.array,
-    device: str,
-    initial_prompt: Optional[str] = None,
     **kwargs: Dict,
-) -> Dict:
-    pcmf32_pt = torch.tensor(pcmf32, device=device, dtype=torch.float32)
-    return model.transcribe(
-        audio=pcmf32_pt,
-        initial_prompt=initial_prompt,
-        condition_on_previous_text=True,
-        **kwargs,
-    )
+):
+    segments, _ = model.transcribe(pcmf32, **kwargs)
+    segments = list(segments)
+    return "".join([s.text for s in segments])
 
 
 def main(
@@ -94,18 +88,20 @@ def main(
     vad_thold: float = 0.6,
     freq_thold: float = 80.0,
     # Whisper params:
-    model_name: str = "base",
+    model_name: str = "large",
+    compute_type: str = "float16",
     language: str = "en",
-    logprob_threshold: float = -1.0,
+    log_prob_threshold: float = -1.0,
     no_speech_threshold: float = 0.2,
     # Prompt params:
     prompt_ms: int = 2000,
     k_prompt: str = "gpt",
     # Stream params:
     keep_ms: int = 100,
-    step_ms: int = 500,
+    step_ms: int = 1000,
 ):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"  - Whisper device: {device}")
     print(f"  - Whisper model: {model_name}")
@@ -113,16 +109,14 @@ def main(
     whisper_gen_kwargs = {
         "language": language,
         "beam_size": 5,
-        "fp16": True,
-        "verbose": None,
         # If the no_speech probability is higher than this value
         # AND the average log probability over sampled tokens
         # is below `logprob_threshold`, consider the segment as silent:
-        "logprob_threshold": logprob_threshold,
         "no_speech_threshold": no_speech_threshold,
+        "log_prob_threshold": log_prob_threshold,
     }
 
-    model = whisper.load_model(model_name, device=device)
+    model = WhisperModel(model_name, device=device, compute_type=compute_type)
 
     print(f"  - Using capture device: {capture_device_id}")
 
@@ -142,8 +136,6 @@ def main(
 
     n_new_line = max(1, length_ms // step_ms - 1)
     print(f"  - # of transcription segments: {n_new_line}")
-
-    whisper_prompt_tokens = None
 
     pcmf32_old = np.empty(0)
 
@@ -168,14 +160,7 @@ def main(
 
                     pcmf32_cur = audio.get(prompt_ms)
 
-                    result = transcribe(
-                        model,
-                        pcmf32_cur,
-                        device,
-                        initial_prompt=None,
-                        **whisper_gen_kwargs,
-                    )
-
+                    result = transcribe(model, pcmf32_cur, **whisper_gen_kwargs)
                     txt = result["text"].strip().strip(".")
 
                     if not txt:
@@ -206,20 +191,14 @@ def main(
                     pcmf32_old = pcmf32
 
                     # run inference
-                    result = transcribe(
-                        model,
-                        pcmf32,
-                        device,
-                        initial_prompt=whisper_prompt_tokens,
-                        **whisper_gen_kwargs,
-                    )
-                    txt = result["text"]
+                    result = transcribe(model, pcmf32, **whisper_gen_kwargs)
+                    txt = result
 
                     # print results
                     sys.stdout.write("\33[2K\r")
                     sys.stdout.flush()
 
-                    print(" " * 100, end="")
+                    print(" " * 200, end="")
 
                     sys.stdout.write("\33[2K\r")
                     sys.stdout.flush()
@@ -236,6 +215,8 @@ def main(
                         # to try to mitigate word boundary issues
                         pcmf32_old = pcmf32[-n_samples_keep:]
 
+                        # TODO:
+                        # add parameter
                         # whisper_prompt_tokens = ""
                         # # Add tokens of the last full length segment as the prompt
                         # # if not no_context (keep context between audio chunks)
