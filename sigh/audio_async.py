@@ -1,5 +1,6 @@
 import numpy as np
 import pyaudio
+from loguru import logger
 
 
 class AudioAsync:
@@ -22,6 +23,7 @@ class AudioAsync:
         self.p = pyaudio.PyAudio()
 
         num_devices = self.p.get_host_api_info_by_index(0).get("deviceCount")
+        devices = []
         for i in range(num_devices):
             if (
                 self.p.get_device_info_by_host_api_device_index(0, i).get(
@@ -32,7 +34,10 @@ class AudioAsync:
                 device_name = self.p.get_device_info_by_host_api_device_index(0, i).get(
                     "name"
                 )
-                print(f"  - Capture device #{i}: '{device_name}'")
+                devices.append((i, device_name))
+        logger.info(f"found {len(devices)} capture devices:")
+        for idx, device in devices:
+            logger.info(f"\t- Capture device #{idx}: `{device}`")
 
         self.stream = self.p.open(
             format=self.format,

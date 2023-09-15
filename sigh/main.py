@@ -9,6 +9,7 @@ import fire
 import numpy as np
 import torch
 from faster_whisper import WhisperModel
+from loguru import logger
 from rapidfuzz.distance.Levenshtein import normalized_distance
 
 from sigh import AudioAsync
@@ -16,7 +17,12 @@ from sigh import AudioAsync
 # avoiding the scipy exit error:
 os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 
+# consts:
 WHISPER_SAMPLE_RATE = 16_000
+
+# configure logger:
+logger.remove()
+logger.add(lambda msg: print(msg, end=""), format="{function}: {message}")
 
 
 def high_pass_filter(data: np.array, cutoff: float, sample_rate: float) -> np.array:
@@ -31,8 +37,6 @@ def high_pass_filter(data: np.array, cutoff: float, sample_rate: float) -> np.ar
     output = np.empty_like(data)
     output[0] = data[0]
 
-    # TODO:
-    # speed up, using numpy:
     for i in range(1, len(data)):
         y = alpha * (y + data[i] - data[i - 1])
         output[i] = y
@@ -46,7 +50,6 @@ def vad(
     last_ms: int,
     vad_thold: float,
     freq_thold: float,
-    verbose: bool = False,
 ) -> bool:
     n_samples = pcmf32.size
     n_samples_last = (sample_rate * last_ms) // 1000
@@ -60,12 +63,6 @@ def vad(
 
     energy_all = np.sum(np.abs(pcmf32)) / n_samples
     energy_last = np.sum(np.abs(pcmf32[-n_samples_last:])) / n_samples_last
-
-    if verbose:
-        print(
-            f"energy_all: {energy_all}, energy_last: {energy_last}, "
-            f"vad_thold: {vad_thold}, freq_thold: {freq_thold}"
-        )
 
     return energy_last <= vad_thold * energy_all
 
@@ -93,6 +90,7 @@ def main(
     language: str = "en",
     log_prob_threshold: float = -1.0,
     no_speech_threshold: float = 0.2,
+    beam_size: int = 5,
     # Prompt params:
     prompt_ms: int = 2000,
     k_prompt: str = "gpt",
@@ -100,15 +98,19 @@ def main(
     keep_ms: int = 100,
     step_ms: int = 1000,
 ):
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print(f"  - Whisper device: {device}")
-    print(f"  - Whisper model: {model_name}")
+    logger.info(f"{'loading model':.<25}{model_name:.>25}")
+    logger.info(f"{'device':.<25}{device:.>25}")
+    logger.info(f"{'compute_type':.<25}{compute_type:.>25}")
+    logger.info(f"{'language':.<25}{language:.>25}")
+    logger.info(f"{'beam_size':.<25}{beam_size:.>25}")
+    logger.info(f"{'no_speech_threshold':.<25}{no_speech_threshold:.>25}")
+    logger.info(f"{'log_prob_threshold':.<25}{log_prob_threshold:.>25}")
 
     whisper_gen_kwargs = {
         "language": language,
-        "beam_size": 5,
+        "beam_size": beam_size,
         # If the no_speech probability is higher than this value
         # AND the average log probability over sampled tokens
         # is below `logprob_threshold`, consider the segment as silent:
@@ -117,8 +119,6 @@ def main(
     }
 
     model = WhisperModel(model_name, device=device, compute_type=compute_type)
-
-    print(f"  - Using capture device: {capture_device_id}")
 
     audio = AudioAsync(
         len_ms=length_ms,
@@ -135,33 +135,38 @@ def main(
     n_samples_keep = int((1e-3 * keep_ms) * WHISPER_SAMPLE_RATE)
 
     n_new_line = max(1, length_ms // step_ms - 1)
-    print(f"  - # of transcription segments: {n_new_line}")
+
+    logger.info(
+        f"step = {step_ms/1000:.2f} sec | "
+        f"buffer = {length_ms/1000:.2f} sec | "
+        f"segments = {n_new_line}"
+    )
 
     pcmf32_old = np.empty(0)
-
-    # prompt:
     have_prompt = True
 
     n_iter = 0
+
     # wait for 1 second to avoid any buffered noise
+    audio.resume()
     time.sleep(1)
     audio.clear()
 
-    print("Waiting for command...")
+    logger.info("Waiting for wake word...")
 
     try:
         while True:
-            time.sleep(100 / 1000)
-            data = audio.get(2000)
-
             if not have_prompt:
-                if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold, False):
-                    print("Speech detected! Processing ...")
+                time.sleep(100 / 1000)
+                data = audio.get(2000)
+
+                if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold):
+                    logger.info("Speech detected! Processing ...")
 
                     pcmf32_cur = audio.get(prompt_ms)
 
-                    result = transcribe(model, pcmf32_cur, **whisper_gen_kwargs)
-                    txt = result["text"].strip().strip(".")
+                    txt = transcribe(model, pcmf32_cur, **whisper_gen_kwargs)
+                    txt = txt.strip().strip(".")
 
                     if not txt:
                         print("WARNING: prompt not recognized, try again")
@@ -174,7 +179,8 @@ def main(
                     have_prompt = True
                     audio.clear()
             else:
-                print("### Transcription START")
+                print("[Start speaking]")
+                sys.stdout.flush()
                 while True:
                     # process new audio
                     pcmf32_new = audio.get(step_ms)
@@ -191,14 +197,13 @@ def main(
                     pcmf32_old = pcmf32
 
                     # run inference
-                    result = transcribe(model, pcmf32, **whisper_gen_kwargs)
-                    txt = result
+                    txt = transcribe(model, pcmf32, **whisper_gen_kwargs)
 
                     # print results
                     sys.stdout.write("\33[2K\r")
                     sys.stdout.flush()
 
-                    print(" " * 200, end="")
+                    print(" " * 50, end="")
 
                     sys.stdout.write("\33[2K\r")
                     sys.stdout.flush()
@@ -223,7 +228,7 @@ def main(
                         # whisper_prompt_tokens += txt
 
     except KeyboardInterrupt:
-        print("Exiting...")
+        print("\nExiting...")
     finally:
         audio.terminate()
 
