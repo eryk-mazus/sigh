@@ -14,11 +14,11 @@ pip install -e .
 ```
 
 ## TODOs:
-- [] implement different modes
-- [] add automatic transcription stopping criteria
-- [] talk with llama 2 (chat)
+- [ ] implement different modes
+- [ ] add automatic transcription stopping criteria
+- [ ] talk with llama 2 (chat)
 
 Lower priority:
-- [] add video example
-- [] colors, bold
-- [] measure time
+- [ ] add video example
+- [ ] colors, bold
+- [ ] measure time
