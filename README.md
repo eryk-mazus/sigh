@@ -8,17 +8,24 @@ Repository is in active development.
 ## Setup:
 
 ```
+set OPENAI_API_KEY=sk-...
+
 git clone https://github.com/eryk-mazus/sigh.git
 cd sigh
 pip install -e .
+# run:
+python ./sigh/main.py --help
+
+# no wake word detection:
+python ./sigh/main.py --detect_wake_word=False
 ```
 
 ## TODOs:
-- [ ] implement different modes
 - [ ] add automatic transcription stopping criteria
+- [ ] implement different modes (wake word, always transcribe, save to file)
 - [ ] talk with llama 2 (chat)
 
 Lower priority:
 - [ ] add video example
 - [ ] colors, bold
-- [ ] measure time
+- [ ] measure execution time

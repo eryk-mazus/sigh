@@ -10,7 +10,7 @@ SYSTEM_PROMPT = (
 )
 
 
-def get_gpt_reponse(prompt: str) -> str:
+def get_gpt_reponse(prompt: str, stream: bool = True) -> str:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
@@ -23,6 +23,12 @@ def get_gpt_reponse(prompt: str) -> str:
         top_p=1.0,
         frequency_penalty=0,
         presence_penalty=0,
+        stream=stream,
     )
 
-    return response.choices[0].message["content"]
+    collected_messages = []
+    for chunk in response:
+        chunk_message = chunk["choices"][0]["delta"]["content"]
+        print(chunk_message, end="", flush=True)
+
+    return "".join(collected_messages)

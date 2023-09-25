@@ -49,7 +49,9 @@ def main(
     log_prob_threshold: float = -1.0,
     no_speech_threshold: float = 0.2,
     beam_size: int = 5,
-    # Prompt params:
+    # wake word params:
+    detect_wake_word: bool = False,
+    wake_word_cutoff: float = 0.6,
     prompt_ms: int = 2000,
     k_prompt: str = "gpt",
     # Stream params:
@@ -96,6 +98,15 @@ def main(
 
     n_new_line = max(1, length_ms // step_ms - 1)
 
+    if detect_wake_word:
+        logger.info(
+            f"wake word = {k_prompt} | "
+            f"wake word duration = {prompt_ms/1000:.2f} sec |"
+            f"similarity cutoff = {detect_wake_word:.2f}"
+        )
+    else:
+        logger.info("Detection of wake word is turned off.")
+
     logger.info(
         f"step = {step_ms/1000:.2f} sec | "
         f"buffer = {length_ms/1000:.2f} sec | "
@@ -103,8 +114,11 @@ def main(
     )
 
     pcmf32_old = np.empty(0)
-    # disabling wake word detection for now:
-    have_prompt = True
+    # disabling wake word detection:
+    # have_prompt = True
+    # TODO:
+    # implement different modes
+    have_prompt = False if detect_wake_word else True
 
     n_iter = 0
 
@@ -113,7 +127,8 @@ def main(
     time.sleep(1)
     audio.clear()
 
-    logger.info("Waiting for wake word...")
+    if not have_prompt:
+        logger.info("Waiting for wake word...")
 
     try:
         while True:
@@ -134,13 +149,16 @@ def main(
                         continue
 
                     print(f"Heard: {txt}")
-                    dist = normalized_distance(txt.lower(), k_prompt)
-                    print(f"prompt = {k_prompt}, dist= {dist:.3f}")
+                    similarity = 1 - normalized_distance(txt.lower(), k_prompt)
+                    print(f"prompt = {k_prompt}, similarity= {similarity:.3f}")
 
-                    have_prompt = True
-                    audio.clear()
+                    if similarity >= wake_word_cutoff:
+                        have_prompt = True
+                        audio.clear()
+                    else:
+                        continue
             else:
-                print("[Start speaking]")
+                print("[Start speaking | Ctrl+C to stop]")
                 sys.stdout.flush()
 
                 llm_hash_table = {}
@@ -207,7 +225,7 @@ def main(
                         llm_prompt = llm_prompt.strip()
 
                         print("[GPT Response]")
-                        print(get_gpt_reponse(llm_prompt))
+                        _ = get_gpt_reponse(llm_prompt)
 
     except KeyboardInterrupt:
         print("\nExiting...")
