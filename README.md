@@ -18,6 +18,9 @@ python ./sigh/main.py --help
 
 # no wake word detection:
 python ./sigh/main.py --detect_wake_word=False
+
+# running in background (soon):
+# https://janakiev.com/blog/python-background/?ref=python-shell-commands
 ```
 
 ## TODOs:
