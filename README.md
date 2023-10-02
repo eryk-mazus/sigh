@@ -26,7 +26,7 @@ python ./sigh/main.py --detect_wake_word=False
 ## TODOs:
 - [ ] add automatic transcription stopping criteria
 - [ ] implement different modes (wake word, always transcribe, save to file)
-- [ ] talk with llama 2 (chat)
+- [ ] talk with local models, e.g. llama2, mistral, etc.
 
 Lower priority:
 - [ ] add video example

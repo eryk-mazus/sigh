@@ -47,7 +47,7 @@ def main(
     compute_type: str = "float16",
     language: str = "en",
     log_prob_threshold: float = -1.0,
-    no_speech_threshold: float = 0.2,
+    no_speech_threshold: float = 0.1,
     beam_size: int = 5,
     # wake word params:
     detect_wake_word: bool = False,
@@ -87,7 +87,6 @@ def main(
         sample_rate=WHISPER_SAMPLE_RATE,
         capture_id=capture_device_id,
     )
-    audio.resume()
 
     # streaming params:
     keep_ms = min(keep_ms, step_ms)
@@ -212,6 +211,7 @@ def main(
                             # # Add tokens of the last full length segment as the prompt
                             # # if not no_context (keep context between audio chunks)
                             # whisper_prompt_tokens += txt
+
                 except KeyboardInterrupt:
                     print("\n", end="", flush=True)
 
@@ -225,7 +225,8 @@ def main(
                         llm_prompt = llm_prompt.strip()
 
                         print("[GPT Response]")
-                        _ = get_gpt_reponse(llm_prompt)
+                        get_gpt_reponse(llm_prompt)
+                        print("\n", end="", flush=True)
 
     except KeyboardInterrupt:
         print("\nExiting...")
