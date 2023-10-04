@@ -2,6 +2,7 @@
 import os
 import re
 import sys
+import threading
 import time
 from typing import Dict
 
@@ -29,10 +30,15 @@ def transcribe(
     model,
     pcmf32: np.array,
     **kwargs: Dict,
-):
+) -> str:
     segments, _ = model.transcribe(pcmf32, **kwargs)
     segments = list(segments)
     return "".join([s.text for s in segments])
+
+
+def listen_for_enter_key(stop_event: threading.Event) -> None:
+    input("Press Enter to stop\n")  # Block until Enter is pressed
+    stop_event.set()
 
 
 def main(
@@ -157,76 +163,80 @@ def main(
                     else:
                         continue
             else:
-                print("[Start speaking | Ctrl+C to stop]")
+                print("[Start speaking | `Enter` to send to LLM]")
                 sys.stdout.flush()
+
+                stop_event = threading.Event()
+                listener_thread = threading.Thread(
+                    target=listen_for_enter_key, args=(stop_event,), daemon=True
+                )
+                listener_thread.start()
 
                 llm_hash_table = {}
                 llm_iter = 0
 
-                try:
-                    while True:
-                        # process new audio
-                        pcmf32_new = audio.get(step_ms)
-                        audio.clear()
+                while not stop_event.is_set():
+                    # process new audio
+                    pcmf32_new = audio.get(step_ms)
+                    audio.clear()
 
-                        n_samples_new = pcmf32_new.size
-                        n_samples_take = min(
-                            pcmf32_old.size,
-                            max(0, n_samples_keep + n_samples_len - n_samples_new),
-                        )
+                    n_samples_new = pcmf32_new.size
+                    n_samples_take = min(
+                        pcmf32_old.size,
+                        max(0, n_samples_keep + n_samples_len - n_samples_new),
+                    )
 
-                        pcmf32 = np.hstack((pcmf32_old[-n_samples_take:], pcmf32_new))
+                    pcmf32 = np.hstack((pcmf32_old[-n_samples_take:], pcmf32_new))
 
-                        pcmf32_old = pcmf32
+                    pcmf32_old = pcmf32
 
-                        # run inference
-                        txt = transcribe(model, pcmf32, **whisper_gen_kwargs)
+                    # run inference
+                    txt = transcribe(model, pcmf32, **whisper_gen_kwargs)
 
-                        # print results
-                        sys.stdout.write("\33[2K\r")
-                        sys.stdout.flush()
+                    # print results
+                    sys.stdout.write("\33[2K\r")
+                    sys.stdout.flush()
 
-                        print(" " * 50, end="")
+                    print(" " * 50, end="")
 
-                        sys.stdout.write("\33[2K\r")
-                        sys.stdout.flush()
+                    sys.stdout.write("\33[2K\r")
+                    sys.stdout.flush()
 
-                        if txt:
-                            print(txt, end="", flush=True)
-                        llm_hash_table[llm_iter] = txt
+                    if txt:
+                        print(txt, end="", flush=True)
+                    llm_hash_table[llm_iter] = txt
 
-                        n_iter += 1
+                    n_iter += 1
 
-                        if n_iter % n_new_line == 0:
-                            print("\n", end="", flush=True)
-                            llm_iter += 1
+                    if n_iter % n_new_line == 0:
+                        print("\n", end="", flush=True)
+                        llm_iter += 1
 
-                            # keep part of the audio for next iteration
-                            # to try to mitigate word boundary issues
-                            pcmf32_old = pcmf32[-n_samples_keep:]
+                        # keep part of the audio for next iteration
+                        # to try to mitigate word boundary issues
+                        pcmf32_old = pcmf32[-n_samples_keep:]
 
-                            # TODO:
-                            # add parameter
-                            # whisper_prompt_tokens = ""
-                            # # Add tokens of the last full length segment as the prompt
-                            # # if not no_context (keep context between audio chunks)
-                            # whisper_prompt_tokens += txt
+                        # TODO:
+                        # add parameter
+                        # whisper_prompt_tokens = ""
+                        # # Add tokens of the last full length segment as the prompt
+                        # # if not no_context (keep context between audio chunks)
+                        # whisper_prompt_tokens += txt
 
-                except KeyboardInterrupt:
+                print("\n", end="", flush=True)
+
+                if respond_with_gpt:
+                    llm_prompt = " ".join(chunk for chunk in llm_hash_table.values())
+                    # simple preprocessing
+                    llm_prompt = llm_prompt.replace("\n", " ")
+                    llm_prompt = re.sub(" +", " ", llm_prompt)
+                    llm_prompt = llm_prompt.strip()
+
+                    print("[GPT Response]")
+                    get_gpt_reponse(llm_prompt)
                     print("\n", end="", flush=True)
 
-                    if respond_with_gpt:
-                        llm_prompt = " ".join(
-                            chunk for chunk in llm_hash_table.values()
-                        )
-                        # simple preprocessing
-                        llm_prompt = llm_prompt.replace("\n", " ")
-                        llm_prompt = re.sub(" +", " ", llm_prompt)
-                        llm_prompt = llm_prompt.strip()
-
-                        print("[GPT Response]")
-                        get_gpt_reponse(llm_prompt)
-                        print("\n", end="", flush=True)
+                stop_event.clear()
 
     except KeyboardInterrupt:
         print("\nExiting...")
