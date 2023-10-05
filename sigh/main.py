@@ -47,7 +47,6 @@ def main(
     capture_device_id: int = 1,
     # VAD params:
     vad_thold: float = 0.6,
-    freq_thold: float = 80.0,
     # Whisper params:
     model_name: str = "large",
     compute_type: str = "float16",
@@ -64,6 +63,7 @@ def main(
     keep_ms: int = 100,
     step_ms: int = 1000,
     # LLM params:
+    silent_chunks_stop_condition: int = 5,
     respond_with_gpt: bool = True,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -119,10 +119,6 @@ def main(
     )
 
     pcmf32_old = np.empty(0)
-    # disabling wake word detection:
-    # have_prompt = True
-    # TODO:
-    # implement different modes
     have_prompt = False if detect_wake_word else True
 
     n_iter = 0
@@ -141,7 +137,7 @@ def main(
                 # time.sleep(100 / 1000)
                 data = audio.get(2000)
 
-                if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold):
+                if vad(data, sampling_rate=WHISPER_SAMPLE_RATE, threshold=vad_thold):
                     logger.info("Speech detected! Processing ...")
 
                     pcmf32_cur = audio.get(prompt_ms)
@@ -174,11 +170,16 @@ def main(
 
                 llm_hash_table = {}
                 llm_iter = 0
+                silence_counter = 0
 
                 while not stop_event.is_set():
                     # process new audio
                     pcmf32_new = audio.get(step_ms)
                     audio.clear()
+
+                    if silence_counter >= silent_chunks_stop_condition:
+                        stop_event.set()
+                        break
 
                     n_samples_new = pcmf32_new.size
                     n_samples_take = min(
@@ -189,6 +190,15 @@ def main(
                     pcmf32 = np.hstack((pcmf32_old[-n_samples_take:], pcmf32_new))
 
                     pcmf32_old = pcmf32
+
+                    if not vad(
+                        pcmf32, sampling_rate=WHISPER_SAMPLE_RATE, threshold=vad_thold
+                    ):
+                        silence_counter += 1
+                        is_silent = True
+                    else:
+                        silence_counter = 0
+                        is_silent = False
 
                     # run inference
                     txt = transcribe(model, pcmf32, **whisper_gen_kwargs)
@@ -202,7 +212,7 @@ def main(
                     sys.stdout.write("\33[2K\r")
                     sys.stdout.flush()
 
-                    if txt:
+                    if txt and not is_silent:
                         print(txt, end="", flush=True)
                     llm_hash_table[llm_iter] = txt
 
