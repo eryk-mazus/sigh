@@ -2,7 +2,9 @@
 import os
 import re
 import sys
+import threading
 import time
+import warnings
 from typing import Dict
 
 import fire
@@ -17,6 +19,8 @@ from sigh import AudioAsync, get_gpt_reponse, vad
 # avoiding the scipy exit error:
 os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 
+warnings.filterwarnings("ignore", category=UserWarning)
+
 # consts:
 WHISPER_SAMPLE_RATE = 16_000
 
@@ -29,10 +33,18 @@ def transcribe(
     model,
     pcmf32: np.array,
     **kwargs: Dict,
-):
+) -> str:
     segments, _ = model.transcribe(pcmf32, **kwargs)
     segments = list(segments)
     return "".join([s.text for s in segments])
+
+
+def listen_for_enter_key(stop_event: threading.Event) -> None:
+    try:
+        input("Press Enter to stop\n")  # Block until Enter is pressed
+        stop_event.set()
+    except (KeyboardInterrupt, EOFError):
+        pass
 
 
 def main(
@@ -41,7 +53,6 @@ def main(
     capture_device_id: int = 1,
     # VAD params:
     vad_thold: float = 0.6,
-    freq_thold: float = 80.0,
     # Whisper params:
     model_name: str = "large",
     compute_type: str = "float16",
@@ -49,15 +60,16 @@ def main(
     log_prob_threshold: float = -1.0,
     no_speech_threshold: float = 0.1,
     beam_size: int = 5,
-    # wake word params:
-    detect_wake_word: bool = False,
-    wake_word_cutoff: float = 0.6,
-    prompt_ms: int = 2000,
-    k_prompt: str = "gpt",
+    # wake phrase params:
+    detect_wake_phrase: bool = False,
+    wake_phrase_cutoff: float = 0.6,
+    wake_ms: int = 2000,
+    wake_phrase: str = "gpt",
     # Stream params:
     keep_ms: int = 100,
     step_ms: int = 1000,
     # LLM params:
+    silent_chunks_stop_condition: int = 8,
     respond_with_gpt: bool = True,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -81,7 +93,6 @@ def main(
     }
 
     model = WhisperModel(model_name, device=device, compute_type=compute_type)
-
     audio = AudioAsync(
         len_ms=length_ms,
         sample_rate=WHISPER_SAMPLE_RATE,
@@ -97,14 +108,16 @@ def main(
 
     n_new_line = max(1, length_ms // step_ms - 1)
 
-    if detect_wake_word:
+    if detect_wake_phrase:
         logger.info(
-            f"wake word = {k_prompt} | "
-            f"wake word duration = {prompt_ms/1000:.2f} sec |"
-            f"similarity cutoff = {detect_wake_word:.2f}"
+            f"wake phrase = {wake_phrase} | "
+            f"wake phrase duration = {wake_ms/1000:.2f} sec |"
+            f"similarity cutoff = {wake_phrase_cutoff:.2f}"
         )
+        have_prompt = False
     else:
         logger.info("Detection of wake word is turned off.")
+        have_prompt = True
 
     logger.info(
         f"step = {step_ms/1000:.2f} sec | "
@@ -113,12 +126,6 @@ def main(
     )
 
     pcmf32_old = np.empty(0)
-    # disabling wake word detection:
-    # have_prompt = True
-    # TODO:
-    # implement different modes
-    have_prompt = False if detect_wake_word else True
-
     n_iter = 0
 
     # wait for 1 second to avoid any buffered noise
@@ -132,13 +139,13 @@ def main(
     try:
         while True:
             if not have_prompt:
-                time.sleep(100 / 1000)
+                # time.sleep(100 / 1000)
                 data = audio.get(2000)
 
-                if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold):
+                if vad(data, sampling_rate=WHISPER_SAMPLE_RATE, threshold=vad_thold):
                     logger.info("Speech detected! Processing ...")
 
-                    pcmf32_cur = audio.get(prompt_ms)
+                    pcmf32_cur = audio.get(wake_ms)
 
                     txt = transcribe(model, pcmf32_cur, **whisper_gen_kwargs)
                     txt = txt.strip().strip(".")
@@ -147,86 +154,112 @@ def main(
                         print("WARNING: prompt not recognized, try again")
                         continue
 
-                    print(f"Heard: {txt}")
-                    similarity = 1 - normalized_distance(txt.lower(), k_prompt)
-                    print(f"prompt = {k_prompt}, similarity= {similarity:.3f}")
+                    print(f"Heard: `{txt}`")
+                    similarity = 1 - normalized_distance(
+                        txt.lower(), wake_phrase.lower()
+                    )
+                    print(
+                        f"Wake Phrase = `{wake_phrase}`, Similarity= {similarity:.3f}"
+                    )
 
-                    if similarity >= wake_word_cutoff:
+                    if similarity >= wake_phrase_cutoff:
                         have_prompt = True
                         audio.clear()
                     else:
                         continue
             else:
-                print("[Start speaking | Ctrl+C to stop]")
+                print(
+                    "\033[35m"
+                    + "[Start speaking | Press `Enter` to manually send to LLM]"
+                    + "\033[0m"
+                )
                 sys.stdout.flush()
+
+                stop_event = threading.Event()
+                listener_thread = threading.Thread(
+                    target=listen_for_enter_key, args=(stop_event,), daemon=True
+                )
+                listener_thread.start()
 
                 llm_hash_table = {}
                 llm_iter = 0
+                silence_counter = 0
 
-                try:
-                    while True:
-                        # process new audio
-                        pcmf32_new = audio.get(step_ms)
-                        audio.clear()
+                while not stop_event.is_set():
+                    # process new audio
+                    pcmf32_new = audio.get(step_ms)
+                    audio.clear()
 
-                        n_samples_new = pcmf32_new.size
-                        n_samples_take = min(
-                            pcmf32_old.size,
-                            max(0, n_samples_keep + n_samples_len - n_samples_new),
-                        )
+                    if silence_counter >= silent_chunks_stop_condition:
+                        stop_event.set()
+                        break
 
-                        pcmf32 = np.hstack((pcmf32_old[-n_samples_take:], pcmf32_new))
+                    n_samples_new = pcmf32_new.size
+                    n_samples_take = min(
+                        pcmf32_old.size,
+                        max(0, n_samples_keep + n_samples_len - n_samples_new),
+                    )
 
-                        pcmf32_old = pcmf32
+                    pcmf32 = np.hstack((pcmf32_old[-n_samples_take:], pcmf32_new))
 
-                        # run inference
-                        txt = transcribe(model, pcmf32, **whisper_gen_kwargs)
+                    pcmf32_old = pcmf32
 
-                        # print results
-                        sys.stdout.write("\33[2K\r")
-                        sys.stdout.flush()
+                    if not vad(
+                        pcmf32, sampling_rate=WHISPER_SAMPLE_RATE, threshold=vad_thold
+                    ):
+                        silence_counter += 1
+                        is_silent = True
+                    else:
+                        silence_counter = 0
+                        is_silent = False
 
-                        print(" " * 50, end="")
+                    # run inference
+                    txt = transcribe(model, pcmf32, **whisper_gen_kwargs)
 
-                        sys.stdout.write("\33[2K\r")
-                        sys.stdout.flush()
+                    # print results
+                    sys.stdout.write("\33[2K\r")
+                    sys.stdout.flush()
 
-                        if txt:
-                            print(txt, end="", flush=True)
-                        llm_hash_table[llm_iter] = txt
+                    print(" " * 50, end="")
 
-                        n_iter += 1
+                    sys.stdout.write("\33[2K\r")
+                    sys.stdout.flush()
 
-                        if n_iter % n_new_line == 0:
-                            print("\n", end="", flush=True)
-                            llm_iter += 1
+                    if txt and not is_silent:
+                        print(txt, end="", flush=True)
+                    llm_hash_table[llm_iter] = txt
 
-                            # keep part of the audio for next iteration
-                            # to try to mitigate word boundary issues
-                            pcmf32_old = pcmf32[-n_samples_keep:]
+                    n_iter += 1
 
-                            # TODO:
-                            # add parameter
-                            # whisper_prompt_tokens = ""
-                            # # Add tokens of the last full length segment as the prompt
-                            # # if not no_context (keep context between audio chunks)
-                            # whisper_prompt_tokens += txt
+                    if n_iter % n_new_line == 0:
+                        print("\n", end="", flush=True)
+                        llm_iter += 1
 
-                except KeyboardInterrupt:
+                        # keep part of the audio for next iteration
+                        # to try to mitigate word boundary issues
+                        pcmf32_old = pcmf32[-n_samples_keep:]
+
+                        # TODO:
+                        # add parameter
+                        # whisper_prompt_tokens = ""
+                        # # Add tokens of the last full length segment as the prompt
+                        # # if not no_context (keep context between audio chunks)
+                        # whisper_prompt_tokens += txt
+
+                print("\n", end="", flush=True)
+
+                if respond_with_gpt:
+                    llm_prompt = " ".join(chunk for chunk in llm_hash_table.values())
+                    # simple preprocessing
+                    llm_prompt = llm_prompt.replace("\n", " ")
+                    llm_prompt = re.sub(" +", " ", llm_prompt)
+                    llm_prompt = llm_prompt.strip()
+
+                    print("\033[35m" + "[GPT Response]" + "\033[0m")
+                    get_gpt_reponse(llm_prompt)
                     print("\n", end="", flush=True)
 
-                    if respond_with_gpt:
-                        llm_prompt = " ".join(
-                            chunk for chunk in llm_hash_table.values()
-                        )
-                        # simple preprocessing
-                        llm_prompt = llm_prompt.replace("\n", " ")
-                        llm_prompt = re.sub(" +", " ", llm_prompt)
-                        llm_prompt = llm_prompt.strip()
-
-                        print("[GPT Response]")
-                        get_gpt_reponse(llm_prompt)
-                        print("\n", end="", flush=True)
+                stop_event.clear()
 
     except KeyboardInterrupt:
         print("\nExiting...")
