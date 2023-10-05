@@ -2,7 +2,10 @@ import numpy as np
 import torch
 
 vad_model, vad_utils = torch.hub.load(
-    repo_or_dir="snakers4/silero-vad", model="silero_vad", force_reload=True
+    repo_or_dir="snakers4/silero-vad",
+    model="silero_vad",
+    force_reload=True,
+    verbose=False,
 )
 
 (get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks) = vad_utils

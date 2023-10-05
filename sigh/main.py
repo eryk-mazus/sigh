@@ -4,6 +4,7 @@ import re
 import sys
 import threading
 import time
+import warnings
 from typing import Dict
 
 import fire
@@ -17,6 +18,8 @@ from sigh import AudioAsync, get_gpt_reponse, vad
 
 # avoiding the scipy exit error:
 os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
+
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # consts:
 WHISPER_SAMPLE_RATE = 16_000
@@ -37,8 +40,11 @@ def transcribe(
 
 
 def listen_for_enter_key(stop_event: threading.Event) -> None:
-    input("Press Enter to stop\n")  # Block until Enter is pressed
-    stop_event.set()
+    try:
+        input("Press Enter to stop\n")  # Block until Enter is pressed
+        stop_event.set()
+    except (KeyboardInterrupt, EOFError):
+        pass
 
 
 def main(
@@ -54,16 +60,16 @@ def main(
     log_prob_threshold: float = -1.0,
     no_speech_threshold: float = 0.1,
     beam_size: int = 5,
-    # wake word params:
-    detect_wake_word: bool = False,
-    wake_word_cutoff: float = 0.6,
-    prompt_ms: int = 2000,
-    k_prompt: str = "gpt",
+    # wake phrase params:
+    detect_wake_phrase: bool = False,
+    wake_phrase_cutoff: float = 0.6,
+    wake_ms: int = 2000,
+    wake_phrase: str = "gpt",
     # Stream params:
     keep_ms: int = 100,
     step_ms: int = 1000,
     # LLM params:
-    silent_chunks_stop_condition: int = 5,
+    silent_chunks_stop_condition: int = 8,
     respond_with_gpt: bool = True,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -87,7 +93,6 @@ def main(
     }
 
     model = WhisperModel(model_name, device=device, compute_type=compute_type)
-
     audio = AudioAsync(
         len_ms=length_ms,
         sample_rate=WHISPER_SAMPLE_RATE,
@@ -103,14 +108,16 @@ def main(
 
     n_new_line = max(1, length_ms // step_ms - 1)
 
-    if detect_wake_word:
+    if detect_wake_phrase:
         logger.info(
-            f"wake word = {k_prompt} | "
-            f"wake word duration = {prompt_ms/1000:.2f} sec |"
-            f"similarity cutoff = {detect_wake_word:.2f}"
+            f"wake phrase = {wake_phrase} | "
+            f"wake phrase duration = {wake_ms/1000:.2f} sec |"
+            f"similarity cutoff = {wake_phrase_cutoff:.2f}"
         )
+        have_prompt = False
     else:
         logger.info("Detection of wake word is turned off.")
+        have_prompt = True
 
     logger.info(
         f"step = {step_ms/1000:.2f} sec | "
@@ -119,8 +126,6 @@ def main(
     )
 
     pcmf32_old = np.empty(0)
-    have_prompt = False if detect_wake_word else True
-
     n_iter = 0
 
     # wait for 1 second to avoid any buffered noise
@@ -140,7 +145,7 @@ def main(
                 if vad(data, sampling_rate=WHISPER_SAMPLE_RATE, threshold=vad_thold):
                     logger.info("Speech detected! Processing ...")
 
-                    pcmf32_cur = audio.get(prompt_ms)
+                    pcmf32_cur = audio.get(wake_ms)
 
                     txt = transcribe(model, pcmf32_cur, **whisper_gen_kwargs)
                     txt = txt.strip().strip(".")
@@ -149,17 +154,25 @@ def main(
                         print("WARNING: prompt not recognized, try again")
                         continue
 
-                    print(f"Heard: {txt}")
-                    similarity = 1 - normalized_distance(txt.lower(), k_prompt)
-                    print(f"prompt = {k_prompt}, similarity= {similarity:.3f}")
+                    print(f"Heard: `{txt}`")
+                    similarity = 1 - normalized_distance(
+                        txt.lower(), wake_phrase.lower()
+                    )
+                    print(
+                        f"Wake Phrase = `{wake_phrase}`, Similarity= {similarity:.3f}"
+                    )
 
-                    if similarity >= wake_word_cutoff:
+                    if similarity >= wake_phrase_cutoff:
                         have_prompt = True
                         audio.clear()
                     else:
                         continue
             else:
-                print("[Start speaking | `Enter` to send to LLM]")
+                print(
+                    "\033[35m"
+                    + "[Start speaking | Press `Enter` to manually send to LLM]"
+                    + "\033[0m"
+                )
                 sys.stdout.flush()
 
                 stop_event = threading.Event()
@@ -242,7 +255,7 @@ def main(
                     llm_prompt = re.sub(" +", " ", llm_prompt)
                     llm_prompt = llm_prompt.strip()
 
-                    print("[GPT Response]")
+                    print("\033[35m" + "[GPT Response]" + "\033[0m")
                     get_gpt_reponse(llm_prompt)
                     print("\n", end="", flush=True)
 
