@@ -138,7 +138,7 @@ def main(
     try:
         while True:
             if not have_prompt:
-                time.sleep(100 / 1000)
+                # time.sleep(100 / 1000)
                 data = audio.get(2000)
 
                 if vad(data, WHISPER_SAMPLE_RATE, 1000, vad_thold, freq_thold):

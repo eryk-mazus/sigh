@@ -1,8 +1,10 @@
 import math
 
 import numpy as np
+from numba import jit
 
 
+@jit(nopython=True)
 def high_pass_filter(data: np.array, cutoff: float, sample_rate: float) -> np.array:
     # python/numpy adaptation of:
     # https://github.com/ggerganov/whisper.cpp/blob/2f52783a080e8955e80e4324fed73e2f906bb80c/examples/common.cpp#L684
@@ -22,6 +24,7 @@ def high_pass_filter(data: np.array, cutoff: float, sample_rate: float) -> np.ar
     return output
 
 
+@jit(nopython=True)
 def vad(
     pcmf32,
     sample_rate: int,
