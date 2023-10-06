@@ -134,7 +134,7 @@ def main(
     audio.clear()
 
     if not have_prompt:
-        logger.info("Waiting for wake word...")
+        logger.info("Waiting for wake phrase...")
 
     try:
         while True:
@@ -184,15 +184,12 @@ def main(
                 llm_hash_table = {}
                 llm_iter = 0
                 silence_counter = 0
+                started_speaking = False
 
                 while not stop_event.is_set():
                     # process new audio
                     pcmf32_new = audio.get(step_ms)
                     audio.clear()
-
-                    if silence_counter >= silent_chunks_stop_condition:
-                        stop_event.set()
-                        break
 
                     n_samples_new = pcmf32_new.size
                     n_samples_take = min(
@@ -213,6 +210,13 @@ def main(
                         silence_counter = 0
                         is_silent = False
 
+                    if (
+                        started_speaking
+                        and silence_counter >= silent_chunks_stop_condition
+                    ):
+                        stop_event.set()
+                        break
+
                     # run inference
                     txt = transcribe(model, pcmf32, **whisper_gen_kwargs)
 
@@ -227,7 +231,10 @@ def main(
 
                     if txt and not is_silent:
                         print(txt, end="", flush=True)
-                    llm_hash_table[llm_iter] = txt
+                        llm_hash_table[llm_iter] = txt
+
+                    if not started_speaking and txt:
+                        started_speaking = True
 
                     n_iter += 1
 
