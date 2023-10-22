@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
+from collections import deque, namedtuple
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import openai
 import tiktoken
@@ -33,7 +34,7 @@ class LLM(ABC):
         ...
 
     @abstractmethod
-    def get_reponse(self, messages: List[SighMessage]) -> SighMessage:
+    def get_reponse(self, messages: List[SighMessage], max_tokens: int) -> SighMessage:
         ...
 
     @abstractmethod
@@ -54,7 +55,7 @@ class OpenAILLM(LLM):
     def count_tokens(self, content: str) -> int:
         return len(self.encoding.encode(content))
 
-    def get_reponse(self, messages: List[SighMessage]) -> SighMessage:
+    def get_reponse(self, messages: List[SighMessage], max_tokens: int) -> SighMessage:
         gpt_messages = self.convert_sigh_messages_to_openai(messages=messages)
 
         response = openai.ChatCompletion.create(
@@ -64,6 +65,7 @@ class OpenAILLM(LLM):
             top_p=1.0,
             frequency_penalty=0,
             presence_penalty=0,
+            max_tokens=max_tokens,
             stream=True,
         )
 
@@ -116,6 +118,85 @@ class OpenAILLMFactory:
         )
 
 
+RetrievalResult = namedtuple("RetrievalResult", ["messages", "remaining_tokens"])
+RetrievalResult.__annotations__ = {
+    "messages": List[SighMessage],
+    "remaining_budget": int,
+}
+
+
+class NegativeTokenBudgetError(ValueError):
+    """Raised when the token budget becomes negative."""
+
+    pass
+
+
 class MemoryBuffer:
-    def __init__(self) -> None:
-        self.buffer: List[SighMessage] = []
+    def __init__(self, system_message: Optional[SighMessage] = None) -> None:
+        self.buffer: deque[SighMessage] = []
+        self.system_message = system_message
+
+    def add_message(self, message: SighMessage) -> None:
+        self.buffer.appendleft(message)
+
+    def retrieve_up_to_k_messages(
+        self,
+        k: int,
+        context_length: int,
+        min_new_tokens: int,
+    ) -> RetrievalResult:
+        """
+        Retrieve up to k messages from the buffer, considering context length.
+
+        If there's a system message, it will always be included as the first message.
+        The method ensures that the total number of tokens from the retrieved
+        messages does not exceed the given context_length minus min_new_tokens.
+
+        Args:
+            k (int): The maximum number of messages to retrieve.
+                If set to -1, attempts to retrieve all messages.
+            context_length (int): The maximum token count of all retrieved messages
+                combined.
+            min_new_tokens (int): The minimum number of tokens that should remain
+                available after retrieving the messages.
+
+        Returns:
+            RetrievalResult: A named tuple containing the list of retrieved messages
+                            (including the system message, if any) and the remaining
+                            token budget after deduction.
+
+        Raises:
+            NegativeTokenBudgetError: If the token budget after deducting
+                the system message length becomes negative.
+
+        Note:
+            The method will prioritize recent messages (i.e., those added
+            later to the buffer).
+        """
+        token_budget = context_length - min_new_tokens
+        if self.system_message:
+            token_budget -= self.system_message.length
+            if token_budget < 0:
+                raise NegativeTokenBudgetError(
+                    f"Token budget is negative: {token_budget}"
+                )
+
+        k = len(self.buffer) if k == -1 else min(k, len(self.buffer))
+
+        output = deque()
+
+        for i in range(k):
+            if (deduction := self.buffer[i].length) <= token_budget:
+                output.appendleft(self.buffer[i])
+                token_budget -= deduction
+            else:
+                break
+
+        output.appendleft(self.system_message)
+        return RetrievalResult(
+            messages=list(output), remaining_tokens=min_new_tokens + token_budget
+        )
+
+
+class LLMInteractor:
+    ...
