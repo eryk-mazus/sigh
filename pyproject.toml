@@ -26,11 +26,16 @@ version = "0.0.1"
 dev = [
     "pre-commit",
     "pyright==1.1.304",
+    "pytest",
 ]
 
 [tool.pyright]
 include = ["sigh*"]
 reportPrivateImportUsage = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
 
 [tool.setuptools.packages.find]
 include = ["sigh"]
