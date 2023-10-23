@@ -41,7 +41,7 @@ class LLM(ABC):
 class OpenAILLM(LLM):
     def __init__(self, model_name: str, context_length: int) -> None:
         self.model_name = model_name
-        self.context_length = context_length
+        self._context_length = context_length
         self.encoding = tiktoken.encoding_for_model(model_name)
 
     @property
