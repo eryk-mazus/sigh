@@ -1,29 +1,25 @@
 from abc import ABC, abstractmethod
 from collections import deque, namedtuple
 from dataclasses import dataclass
-from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 import openai
 import tiktoken
 
-
-class RoleEnum(str, Enum):
-    ASSISTANT = "assistant"
-    USER = "user"
-    SYSTEM = "system"
+Role = Literal["assistant", "user", "system"]
 
 
 @dataclass(slots=True)
 class SighMessage:
     content: str
-    role: RoleEnum
+    role: Role
     length: int
 
     def __post_init__(self):
-        if not isinstance(self.role, RoleEnum):
+        if self.role not in ("assistant", "user", "system"):
             raise ValueError(
-                f"Invalid role: {self.role}. Expected one of {list(RoleEnum)}"
+                f"Invalid role: {self.role}. "
+                "Expected one of ['assistant', 'user', 'system']"
             )
 
 
@@ -199,4 +195,35 @@ class MemoryBuffer:
 
 
 class LLMInteractor:
-    ...
+    def __init__(self, llm: LLM, system_prompt: str) -> None:
+        self.llm = llm
+
+        system_message = SighMessage(
+            content=system_prompt, role="system", length=llm.count_tokens(system_prompt)
+        )
+        self.memory_buffer = MemoryBuffer(system_message=system_message)
+
+    def on_user_message(
+        self,
+        message: str,
+        k: Optional[int] = -1,
+        min_new_tokens: Optional[int] = 256,
+    ) -> SighMessage:
+        user_message = SighMessage(
+            content=message, role="user", length=self.llm.count_tokens(message)
+        )
+
+        self.memory_buffer.add_message(user_message)
+        try:
+            result = self.memory_buffer.retrieve_up_to_k_messages(
+                k=k,
+                context_length=self.llm.context_length,
+                min_new_tokens=min_new_tokens,
+            )
+        except NegativeTokenBudgetError:
+            raise
+
+        ai_message = self.llm.get_response(result.messages, result.remaining_tokens)
+        self.memory_buffer.add_message(ai_message)
+
+        return ai_message
