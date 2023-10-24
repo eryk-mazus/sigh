@@ -25,8 +25,7 @@ python ./sigh/main.py --detect_wake_word=False
 
 ## TODOs:
 - [x] add automatic transcription stopping criteria
-- [x] better GPT responses (system prompt, chat)
-- [ ] add tests
+- [x] better GPT responses (system prompt, chat, memory)
 - [ ] faster wake phrase detection
 - [ ] implement different modes (wake word, always transcribe, save to file, parallel transcription and LLM commentary)
 - [ ] talk with local models, e.g. llama2, mistral, etc.
