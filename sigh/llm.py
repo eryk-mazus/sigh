@@ -8,6 +8,25 @@ import tiktoken
 
 Role = Literal["assistant", "user", "system"]
 
+# OpenAI model: (context length, additional tokens to add per one message)
+# source: https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
+# I kept it as a separate Dict so that it could potentially be updated programmatically
+# if the information expires.
+MODEL_TO_PROPERTIES = {
+    "gpt-4": (8192, 4),
+    "gpt-4-0613": (8192, 4),
+    "gpt-4-32k": (32768, 4),
+    "gpt-4-32k-0613": (32768, 4),
+    "gpt-4-0314": (8192, 4),
+    "gpt-4-32k-0314": (32768, 4),
+    "gpt-3.5-turbo": (4097, 4),
+    "gpt-3.5-turbo-16k": (16385, 4),
+    "gpt-3.5-turbo-instruct": (4097, 4),
+    "gpt-3.5-turbo-0613": (4097, 4),
+    "gpt-3.5-turbo-16k-0613": (16385, 4),
+    "gpt-3.5-turbo-0301": (4097, 4),
+}
+
 
 @dataclass(slots=True)
 class SighMessage:
@@ -39,17 +58,23 @@ class LLM(ABC):
 
 
 class OpenAILLM(LLM):
-    def __init__(self, model_name: str, context_length: int) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        context_length: int,
+        tokens_per_message: int,
+    ) -> None:
         self.model_name = model_name
         self._context_length = context_length
         self.encoding = tiktoken.encoding_for_model(model_name)
+        self.tokens_per_message = tokens_per_message
 
     @property
     def context_length(self) -> int:
         return self._context_length
 
     def count_tokens(self, content: str) -> int:
-        return len(self.encoding.encode(content))
+        return len(self.encoding.encode(content)) + self.tokens_per_message
 
     def get_response(self, messages: List[SighMessage], max_tokens: int) -> SighMessage:
         gpt_messages = self.convert_sigh_messages_to_openai(messages=messages)
@@ -73,9 +98,6 @@ class OpenAILLM(LLM):
             print(chunk_message, end="", flush=True)
             collected_messages.append(chunk_message)
 
-        # TODO:
-        # number of generated tokens can be retrieved from api
-
         full_reply_content = "".join(collected_messages)
         return SighMessage(
             content=full_reply_content,
@@ -95,22 +117,12 @@ class OpenAILLM(LLM):
 class OpenAILLMFactory:
     @staticmethod
     def create(model_name: str) -> OpenAILLM:
-        model_to_context_length = {
-            "gpt-4": 8192,
-            "gpt-4-0613": 8192,
-            "gpt-4-32k": 32768,
-            "gpt-4-32k-0613": 32768,
-            "gpt-4-0314": 8192,
-            "gpt-4-32k-0314": 32768,
-            "gpt-3.5-turbo": 4097,
-            "gpt-3.5-turbo-16k": 16385,
-            "gpt-3.5-turbo-instruct": 4097,
-            "gpt-3.5-turbo-0613": 4097,
-            "gpt-3.5-turbo-16k-0613": 16385,
-            "gpt-3.5-turbo-0301": 4097,
-        }
+        context_length, tokens_per_message = MODEL_TO_PROPERTIES[model_name]
+
         return OpenAILLM(
-            model_name=model_name, context_length=model_to_context_length[model_name]
+            model_name=model_name,
+            context_length=context_length - 3,
+            tokens_per_message=tokens_per_message,
         )
 
 
