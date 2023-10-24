@@ -14,7 +14,7 @@ from faster_whisper import WhisperModel
 from loguru import logger
 from rapidfuzz.distance.Levenshtein import normalized_distance
 
-from sigh import AudioAsync, get_gpt_reponse, vad
+from sigh import AudioAsync, LLMInteractor, OpenAILLMFactory, vad
 
 # avoiding the scipy exit error:
 os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
@@ -47,6 +47,12 @@ def listen_for_enter_key(stop_event: threading.Event) -> None:
         pass
 
 
+def simple_transcription_postprocessing(s: str) -> str:
+    s = s.replace("\n", " ")
+    s = re.sub(" +", " ", s)
+    return s.strip()
+
+
 def main(
     # AudioAsync params:
     length_ms: int = 5000,
@@ -54,27 +60,29 @@ def main(
     # VAD params:
     vad_thold: float = 0.6,
     # Whisper params:
-    model_name: str = "large",
+    whisper_model_name: str = "large",
     compute_type: str = "float16",
     language: str = "en",
     log_prob_threshold: float = -1.0,
     no_speech_threshold: float = 0.1,
     beam_size: int = 5,
-    # wake phrase params:
+    # Wake phrase params:
     detect_wake_phrase: bool = False,
     wake_phrase_cutoff: float = 0.6,
     wake_ms: int = 2000,
     wake_phrase: str = "gpt",
-    # Stream params:
+    # Transcription params:
     keep_ms: int = 100,
     step_ms: int = 1000,
-    # LLM params:
     silent_chunks_stop_condition: int = 8,
+    # LLM params:
+    llm_name: str = "gpt-4",
+    system_prompt: str = "You are a general purpose assistant.",
     respond_with_gpt: bool = True,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    logger.info(f"{'loading model':.<25}{model_name:.>25}")
+    logger.info(f"{'loading model':.<25}{whisper_model_name:.>25}")
     logger.info(f"{'device':.<25}{device:.>25}")
     logger.info(f"{'compute_type':.<25}{compute_type:.>25}")
     logger.info(f"{'language':.<25}{language:.>25}")
@@ -92,11 +100,14 @@ def main(
         "log_prob_threshold": log_prob_threshold,
     }
 
-    model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    model = WhisperModel(whisper_model_name, device=device, compute_type=compute_type)
     audio = AudioAsync(
         len_ms=length_ms,
         sample_rate=WHISPER_SAMPLE_RATE,
         capture_id=capture_device_id,
+    )
+    llm_interactor = LLMInteractor(
+        llm=OpenAILLMFactory.create(model_name=llm_name), system_prompt=system_prompt
     )
 
     # streaming params:
@@ -125,6 +136,7 @@ def main(
         f"segments = {n_new_line}"
     )
 
+    # auxiliary variables:
     pcmf32_old = np.empty(0)
     n_iter = 0
 
@@ -134,7 +146,7 @@ def main(
     audio.clear()
 
     if not have_prompt:
-        logger.info("Waiting for wake word...")
+        logger.info("Waiting for wake phrase...")
 
     try:
         while True:
@@ -184,15 +196,12 @@ def main(
                 llm_hash_table = {}
                 llm_iter = 0
                 silence_counter = 0
+                started_speaking = False
 
                 while not stop_event.is_set():
                     # process new audio
                     pcmf32_new = audio.get(step_ms)
                     audio.clear()
-
-                    if silence_counter >= silent_chunks_stop_condition:
-                        stop_event.set()
-                        break
 
                     n_samples_new = pcmf32_new.size
                     n_samples_take = min(
@@ -213,6 +222,13 @@ def main(
                         silence_counter = 0
                         is_silent = False
 
+                    if (
+                        started_speaking
+                        and silence_counter >= silent_chunks_stop_condition
+                    ):
+                        stop_event.set()
+                        break
+
                     # run inference
                     txt = transcribe(model, pcmf32, **whisper_gen_kwargs)
 
@@ -227,7 +243,10 @@ def main(
 
                     if txt and not is_silent:
                         print(txt, end="", flush=True)
-                    llm_hash_table[llm_iter] = txt
+                        llm_hash_table[llm_iter] = txt
+
+                    if not started_speaking and txt:
+                        started_speaking = True
 
                     n_iter += 1
 
@@ -250,13 +269,12 @@ def main(
 
                 if respond_with_gpt:
                     llm_prompt = " ".join(chunk for chunk in llm_hash_table.values())
-                    # simple preprocessing
-                    llm_prompt = llm_prompt.replace("\n", " ")
-                    llm_prompt = re.sub(" +", " ", llm_prompt)
-                    llm_prompt = llm_prompt.strip()
+                    llm_prompt = simple_transcription_postprocessing(llm_prompt)
 
                     print("\033[35m" + "[GPT Response]" + "\033[0m")
-                    get_gpt_reponse(llm_prompt)
+                    _ = llm_interactor.on_user_message(
+                        llm_prompt, k=5, min_new_tokens=256
+                    )
                     print("\n", end="", flush=True)
 
                 stop_event.clear()
