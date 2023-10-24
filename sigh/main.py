@@ -77,7 +77,7 @@ def main(
     silent_chunks_stop_condition: int = 8,
     # LLM params:
     llm_name: str = "gpt-4",
-    system_prompt: str = "You are a general purpose assistant. ",
+    system_prompt: str = "You are a general purpose assistant.",
     respond_with_gpt: bool = True,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"

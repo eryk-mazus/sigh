@@ -30,7 +30,7 @@ class LLM(ABC):
         ...
 
     @abstractmethod
-    def get_reponse(self, messages: List[SighMessage], max_tokens: int) -> SighMessage:
+    def get_response(self, messages: List[SighMessage], max_tokens: int) -> SighMessage:
         ...
 
     @abstractmethod
@@ -51,7 +51,7 @@ class OpenAILLM(LLM):
     def count_tokens(self, content: str) -> int:
         return len(self.encoding.encode(content))
 
-    def get_reponse(self, messages: List[SighMessage], max_tokens: int) -> SighMessage:
+    def get_response(self, messages: List[SighMessage], max_tokens: int) -> SighMessage:
         gpt_messages = self.convert_sigh_messages_to_openai(messages=messages)
 
         response = openai.ChatCompletion.create(
@@ -129,7 +129,7 @@ class NegativeTokenBudgetError(ValueError):
 
 class MemoryBuffer:
     def __init__(self, system_message: Optional[SighMessage] = None) -> None:
-        self.buffer: deque[SighMessage] = []
+        self.buffer: deque[SighMessage] = deque()
         self.system_message = system_message
 
     def add_message(self, message: SighMessage) -> None:
@@ -188,7 +188,9 @@ class MemoryBuffer:
             else:
                 break
 
-        output.appendleft(self.system_message)
+        if self.system_message:
+            output.appendleft(self.system_message)
+
         return RetrievalResult(
             messages=list(output), remaining_tokens=min_new_tokens + token_budget
         )
