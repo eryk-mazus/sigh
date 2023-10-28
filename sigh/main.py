@@ -121,7 +121,7 @@ def main(
 
     if detect_wake_phrase:
         logger.info(
-            f"wake phrase = {wake_phrase} | "
+            f"wake phrase = \033[96m{wake_phrase}\033[0m | "
             f"wake phrase duration = {wake_ms/1000:.2f} sec |"
             f"similarity cutoff = {wake_phrase_cutoff:.2f}"
         )
